@@ -365,6 +365,71 @@ const handler = createMcpHandler((server) => {
       }
     },
   );
+
+  server.registerTool(
+    "get_recent_posts",
+    {
+      title: "Get Recent Post Titles (Duplicate Check)",
+      description:
+        "Fetch the titles and categories of the most recently published posts on littichokhanews.com. ALWAYS call this FIRST before researching a new article topic, so you can avoid writing about a story that was already covered today.",
+      inputSchema: z.object({
+        count: z
+          .number()
+          .min(1)
+          .max(20)
+          .default(10)
+          .describe("How many recent posts to check (default 10)."),
+      }),
+    },
+    async ({ count }) => {
+      if (!WP_SITE_URL || !WP_USERNAME || !WP_APP_PASSWORD) {
+        return {
+          content: [{ type: "text", text: "Error: Missing WP credentials." }],
+          isError: true,
+        };
+      }
+      const auth = Buffer.from(`${WP_USERNAME}:${WP_APP_PASSWORD}`).toString(
+        "base64",
+      );
+      try {
+        const res = await fetch(
+          `${WP_SITE_URL}/wp-json/wp/v2/posts?per_page=${count}&_fields=title,date,link,categories`,
+          { headers: { Authorization: `Basic ${auth}` } },
+        );
+        if (!res.ok) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Failed to fetch recent posts: ${await res.text()}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+        const posts = await res.json();
+        const summary = posts
+          .map(
+            (p: any) =>
+              `- "${p.title?.rendered ?? "(untitled)"}" (published: ${p.date})`,
+          )
+          .join("\n");
+        return {
+          content: [
+            {
+              type: "text",
+              text: summary || "No recent posts found.",
+            },
+          ],
+        };
+      } catch (e: unknown) {
+        return {
+          content: [{ type: "text", text: `Error: ${errMsg(e)}` }],
+          isError: true,
+        };
+      }
+    },
+  );
 });
 
 export { handler as GET, handler as POST, handler as DELETE };
