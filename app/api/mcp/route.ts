@@ -11,23 +11,102 @@ function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/**
+ * Finds a WordPress category or tag by name (case-insensitive exact match).
+ * If it doesn't exist, creates it. Returns the term ID, or null on failure.
+ */
+async function getOrCreateTermId(
+  type: "categories" | "tags",
+  name: string,
+  siteUrl: string,
+  authHeader: string,
+): Promise<number | null> {
+  const trimmedName = name.trim();
+  if (!trimmedName) return null;
+
+  try {
+    // 1. Search for an existing term with this name
+    const searchRes = await fetch(
+      `${siteUrl}/wp-json/wp/v2/${type}?search=${encodeURIComponent(trimmedName)}&per_page=20`,
+      { headers: { Authorization: `Basic ${authHeader}` } },
+    );
+
+    if (searchRes.ok) {
+      const results = await searchRes.json();
+      const exactMatch = Array.isArray(results)
+        ? results.find(
+            (t: any) =>
+              t?.name?.trim().toLowerCase() === trimmedName.toLowerCase(),
+          )
+        : null;
+      if (exactMatch) return exactMatch.id;
+    }
+
+    // 2. Not found — create it
+    const createRes = await fetch(`${siteUrl}/wp-json/wp/v2/${type}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Basic ${authHeader}`,
+      },
+      body: JSON.stringify({ name: trimmedName }),
+    });
+
+    if (createRes.ok) {
+      const created = await createRes.json();
+      return created.id;
+    }
+
+    // 3. Handle race condition: term was created between our search and create
+    const createErr = await createRes.json().catch(() => null);
+    if (createErr?.code === "term_exists" && createErr?.data?.term_id) {
+      return createErr.data.term_id;
+    }
+
+    console.warn(
+      `[${type}] Failed to find or create "${trimmedName}": ${JSON.stringify(createErr)}`,
+    );
+    return null;
+  } catch (e: unknown) {
+    console.warn(`[${type}] Error resolving "${trimmedName}": ${errMsg(e)}`);
+    return null;
+  }
+}
+
 const handler = createMcpHandler((server) => {
   server.registerTool(
     "publish_post",
     {
-      title: "Publish SEO News Post with 3-Tier Image Fallback",
+      title:
+        "Publish Hindi SEO News Post with Category/Tag Auto-Match and 3-Tier Image Fallback",
       description:
-        "Publish an article in Hindi on littichokhanews.com. Handles images automatically via URL, Gemini 2.5 Flash Image (Nano Banana), or Pollinations.",
+        "Publish an article LIVE (auto-published, never a draft) to littichokhanews.com. ALL text fields (title, content, excerpt) MUST be written in Hindi (Devanagari script) — never English. Automatically matches the article to an existing WordPress category by name, creating a new one only if no close match exists. Automatically matches or creates relevant tags the same way. Handles images automatically via URL, Gemini 2.5 Flash Image (Nano Banana), or Pollinations.",
       inputSchema: z.object({
         title: z
           .string()
           .describe(
-            "Highly compelling, click-worthy headline. 50-65 characters.",
+            "Highly compelling, click-worthy headline IN HINDI (Devanagari script). 50-65 characters.",
           ),
-        content: z.string().describe("The HTML article content."),
+        content: z
+          .string()
+          .describe("The HTML article content, written entirely IN HINDI."),
         excerpt: z
           .string()
-          .describe("A compelling meta description. Max 160 characters."),
+          .describe(
+            "A compelling meta description IN HINDI. Max 160 characters.",
+          ),
+        category_name: z
+          .string()
+          .describe(
+            "The single most relevant category for this article, e.g. 'व्यापार', 'राजनीति', 'खेल', 'मनोरंजन', 'तकनीक'. Reuse an existing site category whenever the topic fits one — only propose a new category name if nothing existing is a reasonable match. This will be looked up on the site and created automatically if it doesn't exist.",
+          ),
+        tag_names: z
+          .array(z.string())
+          .min(1)
+          .max(8)
+          .describe(
+            "3-8 relevant tags in Hindi for this specific article (people, places, organizations, specific topics mentioned). Reuse existing tags where they fit; new ones are created automatically if they don't exist yet.",
+          ),
         featured_image_url: z
           .string()
           .url()
@@ -41,16 +120,16 @@ const handler = createMcpHandler((server) => {
           .describe(
             "TIER 2 & 3: ONLY USE IF NO URL IS FOUND. Provide a highly detailed visual description for AI generation.",
           ),
-        status: z.enum(["publish", "draft"]).default("publish"),
       }),
     },
     async ({
       title,
       content,
       excerpt,
+      category_name,
+      tag_names,
       featured_image_url,
       image_prompt,
-      status,
     }) => {
       if (!WP_SITE_URL || !WP_USERNAME || !WP_APP_PASSWORD) {
         return {
@@ -210,16 +289,41 @@ const handler = createMcpHandler((server) => {
         }
 
         // ==========================================
+        // RESOLVE CATEGORY & TAGS (find existing, else create)
+        // ==========================================
+        console.log(`[Taxonomy] Resolving category: ${category_name}`);
+        const categoryId = await getOrCreateTermId(
+          "categories",
+          category_name,
+          WP_SITE_URL,
+          auth,
+        );
+
+        console.log(
+          `[Taxonomy] Resolving ${tag_names.length} tag(s): ${tag_names.join(", ")}`,
+        );
+        const tagIdResults = await Promise.all(
+          tag_names.map((t) => getOrCreateTermId("tags", t, WP_SITE_URL, auth)),
+        );
+        const tagIds = tagIdResults.filter((id): id is number => id !== null);
+
+        // ==========================================
         // PUBLISH THE ARTICLE
         // ==========================================
         const postPayload: Record<string, unknown> = {
           title,
           content,
           excerpt,
-          status,
+          status: "publish", // Always auto-publish — not agent-controllable
         };
         if (featured_media_id !== null) {
           postPayload.featured_media = featured_media_id;
+        }
+        if (categoryId !== null) {
+          postPayload.categories = [categoryId];
+        }
+        if (tagIds.length > 0) {
+          postPayload.tags = tagIds;
         }
 
         const response = await fetch(`${WP_SITE_URL}/wp-json/wp/v2/posts`, {
