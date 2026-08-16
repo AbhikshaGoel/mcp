@@ -17,7 +17,7 @@ const handler = createMcpHandler((server) => {
     {
       title: "Publish SEO News Post with 3-Tier Image Fallback",
       description:
-        "Publish an article in Hindi to littichokhanews.com. Handles images automatically via URL, Gemini 2.5 Flash Image (Nano Banana), or Pollinations.",
+        "Publish an article in Hindi on littichokhanews.com. Handles images automatically via URL, Gemini 2.5 Flash Image (Nano Banana), or Pollinations.",
       inputSchema: z.object({
         title: z
           .string()
