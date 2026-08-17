@@ -13,7 +13,7 @@ function errMsg(e: unknown): string {
 
 const handler = createMcpHandler((server) => {
   server.registerTool(
-    "publish_post",
+    "publish_post_old",
     {
       title: "Publish SEO News Post with 3-Tier Image Fallback",
       description:
