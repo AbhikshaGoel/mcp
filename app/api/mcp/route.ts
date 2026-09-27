@@ -13,7 +13,7 @@ function errMsg(e: unknown): string {
 
 const handler = createMcpHandler((server) => {
   server.registerTool(
-    "publish_post",
+    "publish_post", // <-- confirm this matches what Apps Script calls
     {
       title: "Publish SEO News Post with 3-Tier Image Fallback",
       description:
@@ -28,6 +28,12 @@ const handler = createMcpHandler((server) => {
         excerpt: z
           .string()
           .describe("A compelling meta description. Max 160 characters."),
+        category: z
+          .string()
+          .optional()
+          .describe(
+            "WordPress category name, e.g. 'Sarkari Naukri' or 'Government Employees'. Will be created if it doesn't exist.",
+          ),
         featured_image_url: z
           .string()
           .url()
@@ -48,6 +54,7 @@ const handler = createMcpHandler((server) => {
       title,
       content,
       excerpt,
+      category,
       featured_image_url,
       image_prompt,
       status,
@@ -94,9 +101,6 @@ const handler = createMcpHandler((server) => {
 
         // ==========================================
         // TIER 2: Gemini 2.5 Flash Image ("Nano Banana")
-        // Imagen model endpoints are deprecated as of Aug 17, 2026 —
-        // Google's current guidance is to use generateContent with
-        // gemini-2.5-flash-image instead of generateImages + Imagen.
         // ==========================================
         if (!imageBuffer && image_prompt && GEMINI_API_KEY) {
           console.log(
@@ -149,8 +153,6 @@ const handler = createMcpHandler((server) => {
 
         // ==========================================
         // TIER 3: Pollinations.ai (FLUX.1 Schnell Fallback)
-        // Pollinations now requires an API key on all generation
-        // requests (get one from enter.pollinations.ai).
         // ==========================================
         if (!imageBuffer && image_prompt) {
           console.log(
@@ -210,6 +212,57 @@ const handler = createMcpHandler((server) => {
         }
 
         // ==========================================
+        // RESOLVE CATEGORY NAME -> ID (find-or-create)
+        // ==========================================
+        let categoryId: number | null = null;
+        if (category && category.trim()) {
+          const categoryName = category.trim();
+          try {
+            const searchRes = await fetch(
+              `${WP_SITE_URL}/wp-json/wp/v2/categories?search=${encodeURIComponent(categoryName)}`,
+              { headers: { Authorization: `Basic ${auth}` } },
+            );
+            if (searchRes.ok) {
+              const matches = await searchRes.json();
+              const exact = matches.find(
+                (c: any) => c.name.toLowerCase() === categoryName.toLowerCase(),
+              );
+              if (exact) {
+                categoryId = exact.id;
+              } else if (matches.length > 0) {
+                categoryId = matches[0].id;
+              }
+            }
+            if (categoryId === null) {
+              const createRes = await fetch(
+                `${WP_SITE_URL}/wp-json/wp/v2/categories`,
+                {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Basic ${auth}`,
+                  },
+                  body: JSON.stringify({ name: categoryName }),
+                },
+              );
+              if (createRes.ok) {
+                const created = await createRes.json();
+                categoryId = created.id;
+                console.log(
+                  `Created new category "${categoryName}" -> ID ${categoryId}`,
+                );
+              } else {
+                console.warn(
+                  `[Category] Failed to create "${categoryName}": ${await createRes.text()}`,
+                );
+              }
+            }
+          } catch (e: unknown) {
+            console.warn(`[Category] Resolution failed: ${errMsg(e)}`);
+          }
+        }
+
+        // ==========================================
         // PUBLISH THE ARTICLE
         // ==========================================
         const postPayload: Record<string, unknown> = {
@@ -220,6 +273,9 @@ const handler = createMcpHandler((server) => {
         };
         if (featured_media_id !== null) {
           postPayload.featured_media = featured_media_id;
+        }
+        if (categoryId !== null) {
+          postPayload.categories = [categoryId];
         }
 
         const response = await fetch(`${WP_SITE_URL}/wp-json/wp/v2/posts`, {
